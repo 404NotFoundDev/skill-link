@@ -62,7 +62,9 @@ export default Canister({
     (payload) => {
       // Validate if the payload is a valid object
       if (typeof payload !== "object" || Object.keys(payload).length === 0) {
-        return Err({ NotFound: `Invalid payload` });
+        return Err({ 
+          NotFound: `Invalid payload: Expected non-empty object, got ${typeof payload}` 
+        });
       }
 
       // Ensure the email address format is valid using regex
@@ -400,10 +402,11 @@ export default Canister({
 
   // Function to fetch job postings
   getAllJobPostings: query(
-    [],
+    [nat64, nat64],
     Result(Vec(Types.JobPosting), Types.Error),
-    () => {
-      const jobPostings = jobPostingsStorage.values();
+    (offset, limit) => {
+      const jobPostings = jobPostingsStorage.values()
+        .slice(Number(offset), Number(offset + limit));
 
       if (jobPostings.length === 0) {
         return Err({ NotFound: `No job postings found` });
@@ -773,7 +776,7 @@ globalThis.crypto = {
 */
 function discardByTimeout(memo: nat64, delay: Duration) {
   ic.setTimer(delay, () => {
-    const order = persistedWorkerReserves.remove(memo);
+    const order = pendingWorkerReserves.remove(memo);
     console.log(`Reserve discarded ${order}`);
   });
 }
@@ -789,22 +792,39 @@ async function verifyPaymentInternal(
   block: nat64,
   memo: nat64
 ): Promise<bool> {
-  const blockData = await ic.call(icpCanister.query_blocks, {
-    args: [{ start: block, length: 1n }],
-  });
-  const tx = blockData.blocks.find((block) => {
-    if ("None" in block.transaction.operation) {
+  try {
+    const blockData = await ic.call(icpCanister.query_blocks, {
+      args: [{ start: block, length: 1n }],
+    });
+
+    if (!blockData || !blockData.blocks) {
       return false;
     }
-    const operation = block.transaction.operation.Some;
-    const senderAddress = binaryAddressFromPrincipal(ic.caller(), 0);
-    const receiverAddress = binaryAddressFromPrincipal(receiver, 0);
-    return (
-      block.transaction.memo === memo &&
-      hash(senderAddress) === hash(operation.Transfer?.from) &&
-      hash(receiverAddress) === hash(operation.Transfer?.to) &&
-      amount === operation.Transfer?.amount.e8s
-    );
-  });
-  return tx ? true : false;
+
+    const tx = blockData.blocks.find((block) => {
+      if ("None" in block.transaction.operation) {
+        return false;
+      }
+      const operation = block.transaction.operation.Some;
+      const senderAddress = binaryAddressFromPrincipal(ic.caller(), 0);
+      const receiverAddress = binaryAddressFromPrincipal(receiver, 0);
+      return (
+        block.transaction.memo === memo &&
+        hash(senderAddress) === hash(operation.Transfer?.from) &&
+        hash(receiverAddress) === hash(operation.Transfer?.to) &&
+        amount === operation.Transfer?.amount.e8s
+      );
+    });
+    return tx ? true : false;
+  } catch (error) {
+    console.error("Error verifying payment:", error);
+    return false;
+  }
 }
+
+// Add proper state transition validation for projects
+const validStatusTransitions = {
+  'InProgress': ['Completed', 'Cancelled'],
+  'Completed': [],
+  'Cancelled': []
+};
